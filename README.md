@@ -21,6 +21,14 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+## Host without localhost
+If you want a hostable single file (no `streamlit run`), use `index.html`.
+
+- Open it directly in a browser, or
+- Upload `index.html` to any static host (GitHub Pages, Netlify, S3 static site, etc.).
+
+This version runs fully client-side and accepts the same 3 CSV inputs.
+
 ## Input schemas
 ### 1) Forecast table
 Required columns:
