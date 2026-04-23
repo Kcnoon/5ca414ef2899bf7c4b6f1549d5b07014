@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Automated Media Planner (Hostable)</title>
+  <style>
+    :root { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    body { margin: 0; background: #f7f8fb; color: #1f2937; }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 24px; }
+    .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+    h1 { margin-top: 0; }
+    .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+    label { display: block; font-size: 13px; margin-bottom: 6px; color: #374151; }
+    input, select, button { width: 100%; padding: 10px; border: 1px solid #d1d5db; border-radius: 8px; box-sizing: border-box; }
+    button { background: #111827; color: #fff; font-weight: 600; cursor: pointer; }
+    button:hover { background: #000; }
+    .muted { color: #6b7280; font-size: 13px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    th, td { border-bottom: 1px solid #e5e7eb; padding: 8px; text-align: left; font-size: 13px; }
+    .metrics { display:grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap:10px; }
+    .metric { background:#f9fafb; border:1px solid #e5e7eb; border-radius:10px; padding:10px; }
+    .metric .k { font-size:12px; color:#6b7280; }
+    .metric .v { font-size:18px; font-weight:700; }
+    .error { color: #b91c1c; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Automated Media Planner (Hostable Static File)</h1>
+    <p class="muted">This runs fully in the browser. Upload 3 CSV files and generate a slot-level media plan without running localhost.</p>
+
+    <div class="card">
+      <h3>1) Upload CSV files</h3>
+      <div class="grid">
+        <div>
+          <label>Forecast table CSV</label>
+          <input id="forecastFile" type="file" accept=".csv" />
+        </div>
+        <div>
+          <label>Campaign performance CSV</label>
+          <input id="campaignsFile" type="file" accept=".csv" />
+        </div>
+        <div>
+          <label>Campaign mapping CSV</label>
+          <input id="mappingFile" type="file" accept=".csv" />
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>2) Brand brief inputs</h3>
+      <div class="grid">
+        <div><label>Brand name</label><input id="brandName" placeholder="Brand A" /></div>
+        <div><label>Brand tag</label><select id="brandTag"><option>New</option><option>Old</option></select></div>
+        <div><label>Comcat</label><input id="comcat" placeholder="FMCG" /></div>
+        <div><label>Budget</label><input id="budget" type="number" value="100000" min="0" /></div>
+        <div><label>Start date</label><input id="startDate" type="date" /></div>
+        <div><label>Duration (days)</label><input id="duration" type="number" value="7" min="1" /></div>
+        <div><label>Reach weight (0-100)</label><input id="wReach" type="number" value="60" min="0" max="100" /></div>
+        <div><label>ROAS weight (0-100)</label><input id="wRoas" type="number" value="40" min="0" max="100" /></div>
+      </div>
+      <p id="error" class="error"></p>
+      <button id="generateBtn">Generate Media Plan</button>
+    </div>
+
+    <div class="card" id="results" style="display:none;">
+      <h3>3) Plan output</h3>
+      <div class="metrics" id="metrics"></div>
+      <button id="downloadBtn" style="max-width:240px; margin-top:10px;">Download plan CSV</button>
+      <div style="overflow:auto; max-height:420px;"><table id="planTable"></table></div>
+    </div>
+  </div>
+
+  <script>
+    const REQUIRED = {
+      forecast: ["date", "page", "slot", "forecast_impressions"],
+      campaigns: ["date", "campaign_code", "slot"],
+      mapping: ["campaign_code", "page", "slot"],
+    };
+
+    const renameMap = {
+      forecast: "forecast_impressions",
+      impressions_forecast: "forecast_impressions",
+      booking: "booked_impressions",
+      bookings: "booked_impressions",
+      delivered: "delivered_impressions",
+      campaign: "campaign_code",
+      campaign_id: "campaign_code",
+    };
+
+    function normalizeKey(k) {
+      return k.trim().toLowerCase().replaceAll(" ", "_");
+    }
+
+    function parseCsv(text) {
+      const lines = text.trim().split(/\r?\n/).filter(Boolean);
+      if (!lines.length) return [];
+      const headers = lines[0].split(",").map(h => normalizeKey(h));
+      return lines.slice(1).map(line => {
+        const cols = line.split(",");
+        const row = {};
+        headers.forEach((h, i) => row[renameMap[h] || h] = (cols[i] || "").trim());
+        return row;
+      });
+    }
+
+    async function readCsvFromInput(inputId) {
+      const file = document.getElementById(inputId).files[0];
+      if (!file) return null;
+      return parseCsv(await file.text());
+    }
+
+    function toNum(v, d = 0) {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : d;
+    }
+
+    function dateOnly(s) {
+      const d = new Date(s);
+      return Number.isNaN(d.getTime()) ? null : d;
+    }
+
+    function hasRequired(rows, required) {
+      if (!rows.length) return false;
+      const keys = new Set(Object.keys(rows[0]));
+      return required.every(k => keys.has(k));
+    }
+
+    function groupBy(arr, keyFn) {
+      const m = new Map();
+      arr.forEach(x => {
+        const k = keyFn(x);
+        if (!m.has(k)) m.set(k, []);
+        m.get(k).push(x);
+      });
+      return m;
+    }
+
+    function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }
+
+    function buildPlan(forecast, campaigns, mapping, inputs) {
+      const endDate = new Date(inputs.startDate);
+      endDate.setDate(endDate.getDate() + Math.max(inputs.durationDays - 1, 0));
+
+      const fWindow = forecast.filter(r => {
+        const d = dateOnly(r.date);
+        return d && d >= inputs.startDate && d <= endDate;
+      });
+      if (!fWindow.length) throw new Error("No forecast inventory found for selected date range.");
+
+      const mapByCampaign = groupBy(mapping, x => x.campaign_code);
+      const history = campaigns.flatMap(c => {
+        const linked = mapByCampaign.get(c.campaign_code) || [{}];
+        return linked.map(m => ({ ...c, ...m }));
+      }).map(h => {
+        const booked = toNum(h.booked_impressions, 0);
+        const delivered = toNum(h.delivered_impressions, 0);
+        const ratio = booked > 0 ? clamp(delivered / booked, 0, 3) : 0;
+        const ud = ["1","true","yes","y"].includes(String(h.underdelivered || "").toLowerCase());
+        return { ...h, delivery_ratio: ratio, efficiency_score: ratio * (ud ? 0.7 : 1.0) };
+      });
+
+      const brandOld = inputs.brandTag.toLowerCase() === "old";
+      let filtered = history;
+      if (brandOld) {
+        const b = history.filter(h => String(h.brand_name || "").toLowerCase() === inputs.brandName.toLowerCase());
+        if (b.length) filtered = b;
+      }
+      if (!brandOld || !filtered.length) {
+        const c = history.filter(h => String(h.comcat || "").toLowerCase() === inputs.comcat.toLowerCase());
+        if (c.length) filtered = c;
+      }
+
+      const perfMap = new Map();
+      filtered.forEach(r => {
+        const k = `${r.page}|||${r.slot}`;
+        if (!perfMap.has(k)) perfMap.set(k, { campaigns: new Set(), ratios: [], eff: [], delivered: 0 });
+        const p = perfMap.get(k);
+        p.campaigns.add(r.campaign_code);
+        p.ratios.push(toNum(r.delivery_ratio));
+        p.eff.push(toNum(r.efficiency_score));
+        p.delivered += toNum(r.delivered_impressions);
+      });
+
+      const invMap = new Map();
+      fWindow.forEach(r => {
+        const k = `${r.page}|||${r.slot}`;
+        invMap.set(k, (invMap.get(k) || 0) + toNum(r.forecast_impressions));
+      });
+
+      const rows = Array.from(invMap.entries()).map(([k, forecast]) => {
+        const [page, slot] = k.split("|||");
+        const p = perfMap.get(k);
+        const avg = (arr, d) => arr?.length ? arr.reduce((a,b)=>a+b,0)/arr.length : d;
+        return {
+          brand_name: inputs.brandName,
+          brand_tag: inputs.brandTag,
+          comcat: inputs.comcat,
+          plan_start_date: inputs.startDate.toISOString().slice(0, 10),
+          plan_end_date: endDate.toISOString().slice(0, 10),
+          page,
+          slot,
+          forecast_impressions_window: forecast,
+          hist_campaigns: p ? p.campaigns.size : 0,
+          avg_delivery_ratio: avg(p?.ratios, 0.8),
+          avg_efficiency_score: avg(p?.eff, 0.8),
+        };
+      });
+
+      const maxF = Math.max(...rows.map(r => r.forecast_impressions_window), 1);
+      const maxE = Math.max(...rows.map(r => r.avg_efficiency_score), 1e-6);
+      const totalW = Math.max(inputs.wReach + inputs.wRoas, 1e-6);
+      const wr = inputs.wReach / totalW;
+      const wo = inputs.wRoas / totalW;
+
+      rows.forEach(r => {
+        const reach = r.forecast_impressions_window / maxF;
+        const roas = r.avg_efficiency_score / maxE;
+        r.final_score = wr * reach + wo * roas;
+      });
+
+      const scoreSum = Math.max(rows.reduce((a, r) => a + r.final_score, 0), 1e-9);
+      rows.forEach(r => {
+        r.budget_allocation = inputs.budget * (r.final_score / scoreSum);
+        r.planned_impressions = r.forecast_impressions_window * (r.budget_allocation / Math.max(inputs.budget, 1e-9));
+      });
+
+      return rows.sort((a, b) => b.budget_allocation - a.budget_allocation);
+    }
+
+    function renderPlan(rows) {
+      const table = document.getElementById("planTable");
+      const cols = Object.keys(rows[0] || {});
+      table.innerHTML = `<thead><tr>${cols.map(c => `<th>${c}</th>`).join("")}</tr></thead><tbody>${rows.map(r => `<tr>${cols.map(c => `<td>${typeof r[c] === 'number' ? r[c].toFixed(2) : r[c]}</td>`).join("")}</tr>`).join("")}</tbody>`;
+
+      const totalBudget = rows.reduce((a,r)=>a+r.budget_allocation,0);
+      const totalImps = rows.reduce((a,r)=>a+r.planned_impressions,0);
+      const avgEff = rows.reduce((a,r)=>a+r.avg_efficiency_score,0)/Math.max(rows.length,1);
+      document.getElementById("metrics").innerHTML = `
+        <div class="metric"><div class="k">Total allocated budget</div><div class="v">${totalBudget.toLocaleString(undefined,{maximumFractionDigits:2})}</div></div>
+        <div class="metric"><div class="k">Projected impressions</div><div class="v">${Math.round(totalImps).toLocaleString()}</div></div>
+        <div class="metric"><div class="k">Slots selected</div><div class="v">${rows.length}</div></div>
+        <div class="metric"><div class="k">Avg efficiency score</div><div class="v">${avgEff.toFixed(2)}</div></div>`;
+
+      document.getElementById("results").style.display = "block";
+
+      document.getElementById("downloadBtn").onclick = () => {
+        const csv = [cols.join(",")].concat(rows.map(r => cols.map(c => r[c]).join(","))).join("\n");
+        const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "media_plan.csv";
+        a.click();
+        URL.revokeObjectURL(url);
+      };
+    }
+
+    document.getElementById("generateBtn").addEventListener("click", async () => {
+      const error = document.getElementById("error");
+      error.textContent = "";
+      try {
+        const [forecast, campaigns, mapping] = await Promise.all([
+          readCsvFromInput("forecastFile"),
+          readCsvFromInput("campaignsFile"),
+          readCsvFromInput("mappingFile"),
+        ]);
+
+        if (!forecast || !campaigns || !mapping) throw new Error("Please upload all 3 CSV files.");
+        if (!hasRequired(forecast, REQUIRED.forecast)) throw new Error("Forecast CSV missing required columns.");
+        if (!hasRequired(campaigns, REQUIRED.campaigns)) throw new Error("Campaign CSV missing required columns.");
+        if (!hasRequired(mapping, REQUIRED.mapping)) throw new Error("Mapping CSV missing required columns.");
+
+        const inputs = {
+          brandName: document.getElementById("brandName").value.trim(),
+          brandTag: document.getElementById("brandTag").value,
+          comcat: document.getElementById("comcat").value.trim(),
+          budget: toNum(document.getElementById("budget").value, 0),
+          startDate: dateOnly(document.getElementById("startDate").value),
+          durationDays: Math.max(1, Math.floor(toNum(document.getElementById("duration").value, 1))),
+          wReach: clamp(toNum(document.getElementById("wReach").value, 0), 0, 100),
+          wRoas: clamp(toNum(document.getElementById("wRoas").value, 0), 0, 100),
+        };
+
+        if (!inputs.brandName || !inputs.comcat) throw new Error("Brand name and comcat are required.");
+        if (!inputs.startDate) throw new Error("Start date is required.");
+        if ((inputs.wReach + inputs.wRoas) === 0) throw new Error("At least one objective weight must be greater than 0.");
+
+        const rows = buildPlan(forecast, campaigns, mapping, inputs);
+        renderPlan(rows);
+      } catch (e) {
+        error.textContent = e.message || String(e);
+      }
+    });
+  </script>
+</body>
+</html>
